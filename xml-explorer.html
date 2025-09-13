@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>XML Explorer — Load & Extract Data from any XML</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; padding: 18px; max-width: 1100px; margin: auto; color: #111; }
+    h1 { margin-top: 0; }
+    .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    .panel { border: 1px solid #ddd; border-radius: 6px; padding: 12px; background: #fafafa; }
+    input[type=text] { padding: 6px 8px; width: 360px; max-width: 60vw; }
+    button { padding: 8px 10px; cursor: pointer; }
+    #output { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    pre { white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; background: #fff; padding: 10px; border-radius: 6px; border: 1px solid #eee; }
+    ul.tree { list-style: none; padding-left: 16px; margin: 0; }
+    li.node { margin: 2px 0; }
+    .tag { color: #0b5; font-weight: 600; }
+    .attr { color: #c55; font-weight: 500; margin-left: 6px; }
+    .text-node { color: #555; margin-left: 10px; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; }
+    label.small { font-size: 0.9rem; color: #444; }
+    .notice { color: #666; font-size: 0.9rem; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <h1>XML Explorer</h1>
+  <p>Load an XML (local file or URL), inspect its tree, list tags, and run XPath or tag-name searches.</p>
+
+  <div class="controls panel">
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      <label class="small">Load local XML file</label>
+      <input id="fileInput" type="file" accept=".xml,application/xml,text/xml" />
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      <label class="small">Or fetch XML from URL (CORS may block some servers)</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input id="urlInput" type="text" placeholder="https://example.com/data.xml" />
+        <button id="fetchBtn">Fetch</button>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:6px;margin-left:auto">
+      <div class="toolbar">
+        <button id="showTreeBtn">Show Tree</button>
+        <button id="showRawBtn">Show Raw</button>
+        <button id="listTagsBtn">List Tags</button>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input id="queryInput" type="text" placeholder="Enter XPath (//book/title) or tag name (title)" />
+        <select id="modeSelect" title="Choose search mode">
+          <option value="xpath">XPath</option>
+          <option value="tag">Tag name</option>
+        </select>
+        <button id="searchBtn">Search</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="notice">Tip: For XPath queries, use standard XPath like //item/title. For tag name searches specify the tag name only (case-sensitive for XML).</div>
+
+  <div id="output">
+    <div class="panel">
+      <h3>Tree / Results</h3>
+      <div id="treeContainer" style="min-height:200px;">
+        <em>No XML loaded yet.</em>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Raw / Metadata</h3>
+      <pre id="rawContainer"><em>Raw XML will appear here.</em></pre>
+    </div>
+  </div>
+
+  <script>
+    // Elements
+    const fileInput = document.getElementById('fileInput');
+    const urlInput = document.getElementById('urlInput');
+    const fetchBtn = document.getElementById('fetchBtn');
+    const showTreeBtn = document.getElementById('showTreeBtn');
+    const showRawBtn = document.getElementById('showRawBtn');
+    const listTagsBtn = document.getElementById('listTagsBtn');
+    const searchBtn = document.getElementById('searchBtn');
+    const modeSelect = document.getElementById('modeSelect');
+    const queryInput = document.getElementById('queryInput');
+    const treeContainer = document.getElementById('treeContainer');
+    const rawContainer = document.getElementById('rawContainer');
+
+    // State
+    let lastXmlText = '';
+    let xmlDoc = null;
+
+    // Utilities
+    function parseXml(text) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(text, 'application/xml');
+
+      // Detect parse errors (common approach)
+      if (doc.getElementsByTagName('parsererror').length > 0) {
+        const errText = doc.getElementsByTagName('parsererror')[0].textContent || 'Unknown XML parse error';
+        throw new Error('XML parse error: ' + errText);
+      }
+      return doc;
+    }
+
+    function xmlToString(node) {
+      try {
+        return new XMLSerializer().serializeToString(node);
+      } catch (e) {
+        return String(node);
+      }
+    }
+
+    // Recursive tree builder
+    function buildTree(node) {
+      const ul = document.createElement('ul');
+      ul.className = 'tree';
+
+      function walk(current, parentUl) {
+        for (let i = 0; i < current.childNodes.length; i++) {
+          const child = current.childNodes[i];
+          if (child.nodeType === Node.ELEMENT_NODE) {
+            const li = document.createElement('li');
+            li.className = 'node';
+            const tagSpan = document.createElement('span');
+            tagSpan.className = 'tag';
+            tagSpan.textContent = '<' + child.nodeName + '>';
+            li.appendChild(tagSpan);
+
+            // attributes
+            if (child.attributes && child.attributes.length > 0) {
+              for (let a = 0; a < child.attributes.length; a++) {
+                const attr = child.attributes[a];
+                const attrSpan = document.createElement('span');
+                attrSpan.className = 'attr';
+                attrSpan.textContent = `${attr.name}="${attr.value}"`;
+                li.appendChild(attrSpan);
+              }
+            }
+
+            // text child (first-level)
+            const text = Array.from(child.childNodes)
+              .filter(n => n.nodeType === Node.TEXT_NODE)
+              .map(n => n.nodeValue.trim())
+              .join(' ')
+              .trim();
+            if (text) {
+              const textSpan = document.createElement('span');
+              textSpan.className = 'text-node';
+              textSpan.textContent = ' — ' + text;
+              li.appendChild(textSpan);
+            }
+
+            const children = Array.from(child.childNodes).some(n => n.nodeType === Node.ELEMENT_NODE);
+            if (children) {
+              const childUl = document.createElement('ul');
+              childUl.className = 'tree';
+              li.appendChild(childUl);
+              walk(child, childUl);
+            }
+
+            parentUl.appendChild(li);
+          } else if (child.nodeType === Node.COMMENT_NODE) {
+            const li = document.createElement('li');
+            li.className = 'node';
+            li.textContent = '<!-- ' + child.nodeValue + ' -->';
+            parentUl.appendChild(li);
+          }
+        }
+      }
+
+      // Start walking from the provided node
+      walk(node, ul);
+      return ul;
+    }
+
+    function showTree() {
+      if (!xmlDoc) {
+        treeContainer.innerHTML = '<em>No valid XML loaded.</em>';
+        return;
+      }
+      treeContainer.innerHTML = '';
+      // show documentElement root
+      const root = xmlDoc.documentElement;
+      if (!root) {
+        treeContainer.innerHTML = '<em>Empty document (no root element).</em>';
+        return;
+      }
+      const top = document.createElement('div');
+      const rootTitle = document.createElement('div');
+      rootTitle.innerHTML = '<strong>Root:</strong> <span class="tag">&lt;' + root.nodeName + '&gt;</span>';
+      top.appendChild(rootTitle);
+      top.appendChild(buildTree(xmlDoc));
+      treeContainer.appendChild(top);
+    }
+
+    function showRaw() {
+      if (!lastXmlText) {
+        rawContainer.textContent = 'No XML loaded.';
+      } else {
+        rawContainer.textContent = lastXmlText;
+      }
+    }
+
+    function listTags() {
+      if (!xmlDoc) {
+        treeContainer.innerHTML = '<em>No valid XML loaded.</em>';
+        return;
+      }
+      const tags = new Set();
+      const walker = xmlDoc.createTreeWalker(xmlDoc, NodeFilter.SHOW_ELEMENT, null, false);
+      while (walker.nextNode()) tags.add(walker.currentNode.nodeName);
+      const arr = Array.from(tags).sort();
+      treeContainer.innerHTML = '<strong>Tags found (' + arr.length + '):</strong><br>' + arr.map(t => '<span class="tag">&lt;' + t + '&gt;</span>').join(' ');
+    }
+
+    function search(query, mode) {
+      if (!xmlDoc) {
+        treeContainer.innerHTML = '<em>No valid XML loaded.</em>';
+        return;
+      }
+      if (!query || !query.trim()) {
+        treeContainer.innerHTML = '<em>Enter a query.</em>';
+        return;
+      }
+      if (mode === 'tag') {
+        // Tag name search (case-sensitive)
+        const nodes = xmlDoc.getElementsByTagName(query.trim());
+        if (nodes.length === 0) {
+          treeContainer.innerHTML = '<em>No elements with tag name "' + query + '" found.</em>';
+          return;
+        }
+        treeContainer.innerHTML = '<strong>Found ' + nodes.length + ' element(s) &lt;' + query + '&gt;:</strong>';
+        const container = document.createElement('div');
+        for (let i = 0; i < nodes.length; i++) {
+          const node = nodes[i];
+          const nodeDiv = document.createElement('div');
+          nodeDiv.style.margin = '8px 0';
+          nodeDiv.innerHTML = '<em>Element #' + (i+1) + ':</em>';
+          const serialized = xmlToString(node);
+          const pre = document.createElement('pre');
+          pre.textContent = serialized;
+          nodeDiv.appendChild(pre);
+          container.appendChild(nodeDiv);
+        }
+        treeContainer.appendChild(container);
+      } else {
+        // XPath mode
+        try {
+          const xpath = query.trim();
+          const result = xmlDoc.evaluate(xpath, xmlDoc, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+          if (result.snapshotLength === 0) {
+            treeContainer.innerHTML = '<em>XPath returned no results.</em>';
+            return;
+          }
+          treeContainer.innerHTML = '<strong>XPath results (' + result.snapshotLength + '):</strong>';
+          const container = document.createElement('div');
+          for (let i = 0; i < result.snapshotLength; i++) {
+            const node = result.snapshotItem(i);
+            const div = document.createElement('div');
+            div.style.margin = '8px 0';
+            const t = node.nodeType === Node.ATTRIBUTE_NODE ? '@' + node.nodeName : node.nodeName;
+            const header = document.createElement('div');
+            header.innerHTML = '<em>Result #' + (i+1) + ' - nodeName: ' + t + '</em>';
+            div.appendChild(header);
+            const pre = document.createElement('pre');
+            if (node.nodeType === Node.ATTRIBUTE_NODE) {
+              pre.textContent = node.value;
+            } else if (node.nodeType === Node.ELEMENT_NODE) {
+              pre.textContent = xmlToString(node);
+            } else {
+              pre.textContent = node.textContent;
+            }
+            div.appendChild(pre);
+            container.appendChild(div);
+          }
+          treeContainer.appendChild(container);
+        } catch (err) {
+          treeContainer.innerHTML = '<em>XPath error: ' + String(err) + '</em>';
+        }
+      }
+    }
+
+    // Event handlers
+    fileInput.addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      try {
+        const txt = await f.text();
+        lastXmlText = txt;
+        xmlDoc = parseXml(txt);
+        showTree();
+        showRaw();
+      } catch (err) {
+        xmlDoc = null;
+        lastXmlText = '';
+        treeContainer.innerHTML = '<em>Error parsing XML: ' + err.message + '</em>';
+        rawContainer.textContent = '';
+      }
+    });
+
+    fetchBtn.addEventListener('click', async () => {
+      const url = urlInput.value.trim();
+      if (!url) return alert('Enter a URL');
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Network error: ' + res.status + ' ' + res.statusText);
+        const txt = await res.text();
+        lastXmlText = txt;
+        xmlDoc = parseXml(txt);
+        showTree();
+        showRaw();
+      } catch (err) {
+        xmlDoc = null;
+        lastXmlText = '';
+        treeContainer.innerHTML = '<em>Error fetching/parsing XML: ' + err.message + '</em>';
+        rawContainer.textContent = '';
+      }
+    });
+
+    showTreeBtn.addEventListener('click', () => showTree());
+    showRawBtn.addEventListener('click', () => showRaw());
+    listTagsBtn.addEventListener('click', () => listTags());
+    searchBtn.addEventListener('click', () => {
+      const q = queryInput.value;
+      const mode = modeSelect.value;
+      search(q, mode);
+    });
+
+    // Small helper: allow pressing Enter in query input to trigger search
+    queryInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        searchBtn.click();
+      }
+    });
+
+    // Expose some functions for console debugging
+    window.xmlExplorer = {
+      getXmlDoc: () => xmlDoc,
+      getRaw: () => lastXmlText,
+      parseXmlText: (txt) => { lastXmlText = txt; xmlDoc = parseXml(txt); return xmlDoc; }
+    };
+  </script>
+</body>
+</html>
